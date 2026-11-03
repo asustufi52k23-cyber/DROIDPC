@@ -1,9 +1,9 @@
-name: Import ZIP revision
+name: Import ZIP from repository root
 
 on:
   push:
     paths:
-      - "updates/*.zip"
+      - "*.zip"
       - ".github/workflows/import-zip.yml"
       - "scripts/extract-update.py"
 
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: import-zip-${{ github.ref }}
+  group: import-root-zip-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -27,12 +27,12 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Extract uploaded ZIP revisions
+      - name: Extract ZIP files uploaded to repository root
         run: |
           shopt -s nullglob
-          archives=(updates/*.zip)
+          archives=(./*.zip)
           if [ ${#archives[@]} -eq 0 ]; then
-            echo "No ZIP revisions found."
+            echo "No ZIP files found in repository root."
             exit 0
           fi
           for archive in "${archives[@]}"; do
@@ -40,6 +40,34 @@ jobs:
             python scripts/extract-update.py "$archive"
             rm -- "$archive"
           done
+
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $scriptRoot = Join-Path $env:GITHUB_WORKSPACE "scripts"
+          if (-not (Test-Path -LiteralPath $scriptRoot -PathType Container)) {
+            Write-Error "The ZIP did not produce the required scripts directory."
+            exit 1
+          }
+
+          $files = Get-ChildItem -LiteralPath $scriptRoot -Filter *.ps1 -File
+          if ($files.Count -eq 0) {
+            Write-Error "No PowerShell (.ps1) files were found in scripts/."
+            exit 1
+          }
+
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
+            Write-Host "OK: $($file.Name)"
+          }
 
       - name: Commit extracted changes
         run: |
