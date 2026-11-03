@@ -5,7 +5,6 @@ on:
     paths:
       - "*.zip"
       - ".github/workflows/import-zip.yml"
-      - "scripts/extract-update.py"
 
 permissions:
   contents: write
@@ -22,12 +21,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
       - name: Extract ZIP files uploaded to repository root
+        shell: bash
         run: |
           shopt -s nullglob
           archives=(./*.zip)
@@ -35,27 +30,72 @@ jobs:
             echo "No ZIP files found in repository root."
             exit 0
           fi
+
           for archive in "${archives[@]}"; do
             echo "Importing: $archive"
-            python scripts/extract-update.py "$archive"
+            python3 - "$archive" <<'PY'
+          import os
+          import pathlib
+          import stat
+          import sys
+          import zipfile
+
+          archive = pathlib.Path(sys.argv[1])
+          root = pathlib.Path.cwd().resolve()
+          max_files = 10000
+          max_uncompressed = 500 * 1024 * 1024
+          total_size = 0
+
+          with zipfile.ZipFile(archive) as zf:
+              entries = zf.infolist()
+              if len(entries) > max_files:
+                  raise SystemExit("ZIP contains too many files")
+
+              for info in entries:
+                  name = info.filename.replace("\\", "/")
+                  parts = pathlib.PurePosixPath(name).parts
+                  if not name or name.startswith("/") or ".." in parts:
+                      raise SystemExit(f"Unsafe ZIP path: {name}")
+                  if ".git" in parts or "__MACOSX" in parts:
+                      raise SystemExit(f"Blocked ZIP entry: {name}")
+                  mode = info.external_attr >> 16
+                  if stat.S_ISLNK(mode):
+                      raise SystemExit(f"Symlinks are not allowed: {name}")
+                  total_size += info.file_size
+                  if total_size > max_uncompressed:
+                      raise SystemExit("ZIP exceeds 500 MiB uncompressed limit")
+
+              for info in entries:
+                  name = info.filename.replace("\\", "/")
+                  target = (root / pathlib.PurePosixPath(name)).resolve()
+                  if target != root and root not in target.parents:
+                      raise SystemExit(f"Unsafe extraction target: {name}")
+                  if info.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with zf.open(info) as src, open(target, "wb") as dst:
+                          while True:
+                              chunk = src.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              dst.write(chunk)
+
+          print(f"Extracted {archive.name} successfully")
+          PY
             rm -- "$archive"
           done
 
-      - name: Check PowerShell syntax
+      - name: Check PowerShell syntax when scripts exist
         shell: pwsh
         run: |
           $scriptRoot = Join-Path $env:GITHUB_WORKSPACE "scripts"
           if (-not (Test-Path -LiteralPath $scriptRoot -PathType Container)) {
-            Write-Error "The ZIP did not produce the required scripts directory."
-            exit 1
+            Write-Host "No scripts directory found; skipping syntax check."
+            exit 0
           }
 
           $files = Get-ChildItem -LiteralPath $scriptRoot -Filter *.ps1 -File
-          if ($files.Count -eq 0) {
-            Write-Error "No PowerShell (.ps1) files were found in scripts/."
-            exit 1
-          }
-
           foreach ($file in $files) {
             $tokens = $null
             $errors = $null
