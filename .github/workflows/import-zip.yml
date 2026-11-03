@@ -1,0 +1,54 @@
+name: Import ZIP revision
+
+on:
+  push:
+    paths:
+      - "updates/*.zip"
+      - ".github/workflows/import-zip.yml"
+      - "scripts/extract-update.py"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-zip-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    if: "!contains(github.event.head_commit.message, '[skip zip import]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Extract uploaded ZIP revisions
+        run: |
+          shopt -s nullglob
+          archives=(updates/*.zip)
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "No ZIP revisions found."
+            exit 0
+          fi
+          for archive in "${archives[@]}"; do
+            echo "Importing: $archive"
+            python scripts/extract-update.py "$archive"
+            rm -- "$archive"
+          done
+
+      - name: Commit extracted changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No file changes to commit."
+          else
+            git commit -m "Apply uploaded ZIP revision [skip zip import]"
+            git push
+          fi
